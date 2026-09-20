@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Owner sign-in</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet" />
+  <style>
+    /* Values copied from src/components/Theme.jsx */
+    :root {
+      --font: "Playfair Display", serif;
+
+      --text-dark: #0F1F1B;
+      --text-muted: #5B6B67;
+      --text-body: #3A4744;
+
+      --accent: #2F9E8B;
+      --accent-light: #4FBFAE;
+
+      --border: #2F9E8B22;
+      --border-strong: #2F9E8B55;
+
+      --card-bg: #FFFFFF;
+      --field-bg: #F0FAF8;
+      --section-bg: #F5F6F5;
+
+      --error: #B4483A;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: var(--section-bg);
+      color: var(--text-body);
+      font: 400 16px/1.55 var(--font);
+    }
+
+    .card {
+      width: 100%;
+      max-width: 420px;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-top: 3px solid var(--accent);
+      border-radius: 10px;
+      padding: 32px 28px 28px;
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      color: var(--text-dark);
+      font: 700 30px/1.15 var(--font);
+      letter-spacing: -0.01em;
+    }
+    .lede { margin: 0 0 24px; color: var(--text-muted); font-size: 15px; }
+    strong { color: var(--text-dark); }
+
+    label { display: block; margin: 0 0 6px; color: var(--text-dark); font-size: 14px; font-weight: 600; }
+    .field { margin-bottom: 18px; }
+
+    .input-wrap { position: relative; }
+    input {
+      width: 100%;
+      height: 46px;
+      padding: 0 14px;
+      color: var(--text-dark);
+      background: var(--field-bg);
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      font: inherit;
+    }
+    input[readonly] {
+      background: var(--section-bg);
+      border-color: var(--border-strong);
+      color: var(--text-muted);
+      padding-left: 38px;
+      cursor: not-allowed;
+    }
+    input.has-toggle { padding-right: 64px; }
+    input:focus-visible, button:focus-visible {
+      outline: 2px solid var(--text-dark);
+      outline-offset: 2px;
+    }
+    .lock {
+      position: absolute; left: 13px; top: 50%; translate: 0 -50%;
+      width: 16px; height: 16px; color: var(--text-muted); pointer-events: none;
+    }
+    .toggle {
+      position: absolute; right: 6px; top: 50%; translate: 0 -50%;
+      height: 32px; padding: 0 10px;
+      background: none; border: 0; border-radius: 4px;
+      color: var(--text-muted); font: inherit; font-size: 13px; cursor: pointer;
+    }
+
+    .otp { letter-spacing: 0.4em; font-size: 20px; text-align: center; padding-left: 14px; }
+
+    .btn {
+      width: 100%; height: 48px;
+      background: var(--accent); color: var(--text-dark);
+      border: 0; border-radius: 6px;
+      font: inherit; font-weight: 700; cursor: pointer;
+    }
+    .btn:hover:not([disabled]) { background: var(--accent-light); }
+    .btn[disabled] { opacity: 0.6; cursor: progress; }
+
+    .link {
+      background: none; border: 0; padding: 0;
+      color: var(--text-body); font: inherit; font-size: 14px;
+      text-decoration: underline; text-decoration-color: var(--accent);
+      text-decoration-thickness: 2px; text-underline-offset: 4px; cursor: pointer;
+    }
+    .row { display: flex; justify-content: space-between; align-items: center; margin-top: 18px; }
+
+    .msg {
+      min-height: 22px; margin: 0 0 14px; padding-left: 10px;
+      border-left: 3px solid transparent; font-size: 14px;
+    }
+    .msg:empty { border-left: 0; padding-left: 0; }
+    .msg.error { color: var(--error); border-left-color: var(--error); }
+    .msg.ok { color: var(--text-dark); border-left-color: var(--accent); }
+
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main class="card">
+
+    <!-- ============ LOGIN ============ -->
+    <section id="view-login">
+      <h1>Owner sign-in</h1>
+      <p class="lede">Enter your password to manage the portfolio.</p>
+
+      <p id="login-msg" class="msg" role="alert" aria-live="polite"></p>
+
+      <form id="login-form" novalidate>
+        <div class="field">
+          <label for="email">Email</label>
+          <div class="input-wrap">
+            <svg class="lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+            <input id="email" type="email" value="<%= email %>" readonly />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="password">Password</label>
+          <div class="input-wrap">
+            <input id="password" class="has-toggle" type="password" autocomplete="current-password" required autofocus />
+            <button type="button" class="toggle" data-toggle="password" aria-label="Show password">Show</button>
+          </div>
+        </div>
+
+        <button id="login-btn" class="btn" type="submit">Log in</button>
+      </form>
+
+      <div class="row">
+        <button type="button" id="go-reset" class="link">Forgot password?</button>
+      </div>
+    </section>
+
+    <!-- ============ RESET ============ -->
+    <section id="view-reset" hidden>
+      <h1>Reset password</h1>
+      <p class="lede">We’ll email a 6-digit code to <strong><%= maskedEmail %></strong>. It works for 10 minutes.</p>
+
+      <p id="reset-msg" class="msg" role="alert" aria-live="polite"></p>
+
+      <button id="send-btn" class="btn" type="button">Send code</button>
+
+      <form id="reset-form" novalidate hidden style="margin-top: 22px;">
+        <div class="field">
+          <label for="otp">6-digit code</label>
+          <input id="otp" class="otp" inputmode="numeric" pattern="\d{6}" maxlength="6" autocomplete="one-time-code" />
+        </div>
+
+        <div class="field">
+          <label for="new-password">New password</label>
+          <div class="input-wrap">
+            <input id="new-password" class="has-toggle" type="password" autocomplete="new-password" minlength="8" />
+            <button type="button" class="toggle" data-toggle="new-password" aria-label="Show password">Show</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="confirm-password">Confirm new password</label>
+          <input id="confirm-password" type="password" autocomplete="new-password" />
+        </div>
+
+        <button id="reset-btn" class="btn" type="submit">Save password</button>
+      </form>
+
+      <div class="row">
+        <button type="button" id="back-login" class="link">Back to log in</button>
+      </div>
+    </section>
+
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    const views = { login: $("view-login"), reset: $("view-reset") };
+    function show(name) {
+      Object.entries(views).forEach(([key, el]) => (el.hidden = key !== name));
+      setMsg("login-msg", "");
+      setMsg("reset-msg", "");
+    }
+
+    function setMsg(id, text, type) {
+      const el = $(id);
+      el.textContent = text || "";
+      el.className = "msg" + (type ? " " + type : "");
+    }
+
+    async function post(url, body) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(body || {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Something went wrong.");
+      return data;
+    }
+
+    // Show / hide password
+    document.querySelectorAll("[data-toggle]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const input = $(btn.dataset.toggle);
+        const hidden = input.type === "password";
+        input.type = hidden ? "text" : "password";
+        btn.textContent = hidden ? "Hide" : "Show";
+        btn.setAttribute("aria-label", hidden ? "Hide password" : "Show password");
+      });
+    });
+
+    // Switch views
+    $("go-reset").addEventListener("click", () => show("reset"));
+    $("back-login").addEventListener("click", () => show("login"));
+
+    // Log in
+    $("login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = $("login-btn");
+      setMsg("login-msg", "");
+      if (!$("password").value) return setMsg("login-msg", "Enter your password.", "error");
+
+      btn.disabled = true;
+      try {
+        const data = await post("/auth/login", { password: $("password").value });
+        window.location.href = data.redirect || "/";
+      } catch (err) {
+        setMsg("login-msg", err.message, "error");
+        btn.disabled = false;
+      }
+    });
+
+    // Send code (with a 60s cooldown so the button matches the server rule)
+    const sendBtn = $("send-btn");
+    let cooldownTimer;
+    function startCooldown(seconds) {
+      let left = seconds;
+      clearInterval(cooldownTimer);
+      sendBtn.disabled = true;
+      const tick = () => {
+        if (left <= 0) {
+          clearInterval(cooldownTimer);
+          sendBtn.disabled = false;
+          sendBtn.textContent = "Send a new code";
+          return;
+        }
+        sendBtn.textContent = "Send a new code in " + left + "s";
+        left -= 1;
+      };
+      tick();
+      cooldownTimer = setInterval(tick, 1000);
+    }
+
+    sendBtn.addEventListener("click", async () => {
+      setMsg("reset-msg", "");
+      sendBtn.disabled = true;
+      sendBtn.textContent = "Sending…";
+      try {
+        const data = await post("/auth/forgot");
+        setMsg("reset-msg", data.message, "ok");
+        $("reset-form").hidden = false;
+        $("otp").focus();
+        startCooldown(60);
+      } catch (err) {
+        setMsg("reset-msg", err.message, "error");
+        sendBtn.disabled = false;
+        sendBtn.textContent = $("reset-form").hidden ? "Send code" : "Send a new code";
+      }
+    });
+
+    // Save new password
+    $("reset-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = $("reset-btn");
+      const otp = $("otp").value.trim();
+      const pw = $("new-password").value;
+
+      if (!/^\d{6}$/.test(otp)) return setMsg("reset-msg", "Enter the 6-digit code.", "error");
+      if (pw.length < 8) return setMsg("reset-msg", "Password must be at least 8 characters.", "error");
+      if (pw !== $("confirm-password").value) return setMsg("reset-msg", "The two passwords don’t match.", "error");
+
+      btn.disabled = true;
+      try {
+        const data = await post("/auth/reset", { otp, newPassword: pw });
+        $("reset-form").reset();
+        $("reset-form").hidden = true;
+        clearInterval(cooldownTimer);
+        sendBtn.disabled = false;
+        sendBtn.textContent = "Send code";
+        show("login");
+        setMsg("login-msg", data.message, "ok");
+        $("password").focus();
+      } catch (err) {
+        setMsg("reset-msg", err.message, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
