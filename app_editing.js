@@ -43,7 +43,7 @@ const OWNER_EMAIL = (process.env.OWNER_EMAIL || process.env.owner_email || "")
   .toLowerCase();
 
 if (!OWNER_EMAIL) throw new Error("OWNER_EMAIL is missing in .env");
-if (!process.env.SECRET) throw new Error("SECRET is missing in .env");
+if (!process.env.AUTH_SECRET) throw new Error("AUTH_SECRET is missing in .env");
 
 // One or more frontend addresses, comma separated, no trailing slash:
 //   FRONTEND_URL=https://rishabheditportfolio.vercel.app
@@ -164,7 +164,7 @@ const sha256 = (value) =>
 
 // OTPs are stored only as an HMAC, never in plain text
 const hashOtp = (otp) =>
-  crypto.createHmac("sha256", process.env.SECRET).update(otp).digest("hex");
+  crypto.createHmac("sha256", process.env.AUTH_SECRET).update(otp).digest("hex");
 
 // Frontend (vercel.app) and backend (onrender.com) are different sites, so in
 // production the cookie must be SameSite=None + Secure or the browser won't
@@ -214,20 +214,20 @@ async function endSession(req, res) {
 }
 
 // Brevo transactional email (Node 18+ has global fetch).
-// Only My_Own_API_KEY is required in .env. The "from" address defaults to
+// Only MY_OWN_API_KEY is required in .env. The "from" address defaults to
 // OWNER_EMAIL, which must be a sender/email you have verified in Brevo.
-// If Brevo rejects it, set My_Own_API_SECRET to a verified sender.
+// If Brevo rejects it, set MY_OWN_EMAIL to a verified sender.
 // Brevo transactional email (Node 18+ has global fetch).
-// Only My_Own_API_KEY is required in .env. The "from" address defaults to
+// Only MY_OWN_API_KEY is required in .env. The "from" address defaults to
 // OWNER_EMAIL, which must be a sender/email you have verified in Brevo.
-// If Brevo rejects it, set My_Own_API_SECRET to a verified sender.
+// If Brevo rejects it, set MY_OWN_EMAIL to a verified sender.
 async function sendOtpEmail(to, otp) {
-  if (!process.env.My_Own_API_KEY) {
-    console.error("[OTP] FAILED - My_Own_API_KEY is missing in the environment variables.");
-    throw new Error("My_Own_API_KEY is missing");
+  if (!process.env.MY_OWN_API_KEY) {
+    console.error("[OTP] FAILED - MY_OWN_API_KEY is missing in the environment variables.");
+    throw new Error("MY_OWN_API_KEY is missing");
   }
 
-  const from = process.env.My_Own_API_SECRET;
+  const from = process.env.MY_OWN_EMAIL;
   console.log(`OTP Sending reset code to ${maskEmail(to)} (from ${from})...`);
 
   let res;
@@ -235,7 +235,7 @@ async function sendOtpEmail(to, otp) {
     res = await fetch("https://api.brevo.com/v3/smtp/email", {
       method: "POST",
       headers: {
-        "api-key": process.env.My_Own_API_KEY,
+        "api-key": process.env.MY_OWN_API_KEY,
         "content-type": "application/json",
         accept: "application/json",
       },
