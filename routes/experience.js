@@ -5,19 +5,19 @@
 //   const experienceRoutes = require("./routes/experience")(pool, cloudinary);
 //   app.use("/api", experienceRoutes);
 //
-// Same pattern as routes/projects.js: category table + item table, each
-// with its own `position`, fractional-index insertion via insertBeforeId,
-// and the item's image uploaded straight to Cloudinary from this file.
-//
 // Endpoints exposed (all mounted under /api):
 //   GET    /experience                          -> { categories: [...] }
 //   POST   /experience-categories                -> create a category
 //   PATCH  /experience-categories/:id            -> rename a category
 //   DELETE /experience-categories/:id            -> delete a category (cascades its experiences)
 //   POST   /experiences                          -> create an experience entry
-//   PATCH  /experiences/:id                      -> edit companyName/role/description/duration/techStack/certificateUrl
+//   PATCH  /experiences/:id                      -> edit companyName/role/description/dates/techStack/
+//                                                   certificateUrl/videoUrl/documentUrl
 //   DELETE /experiences/:id                      -> delete an experience entry
 //   POST   /experiences/:id/image (multipart)    -> upload/replace the company logo/image via Cloudinary
+//
+// videoUrl and documentUrl are plain external links (YouTube, Google Drive, ...),
+// saved on BOTH the first add (POST) and later edits (PATCH).
 
 const express = require("express");
 const multer = require("multer");
@@ -30,11 +30,7 @@ module.exports = function experienceRoutes(pool, cloudinary) {
     limits: { fileSize: 8 * 1024 * 1024 }, // 8MB
   });
 
-  // ---- Cloudinary cleanup helpers (same pattern as routes/projects.js) ----
-  // secure_urls look like:
-  //   https://res.cloudinary.com/<cloud>/image/upload/v169.../portfolio/experience/abc123.jpg
-  // The public_id is embedded in the path, so no separate DB column is needed
-  // to know what to destroy on Cloudinary.
+  // ---- Cloudinary cleanup helpers ----
   function parseCloudinaryAsset(url) {
     if (!url) return null;
     const match = url.match(/\/image\/upload\/(?:v\d+\/)?([^.]+)\.[a-zA-Z0-9]+(?:\?.*)?$/);
@@ -44,19 +40,25 @@ module.exports = function experienceRoutes(pool, cloudinary) {
 
   async function deleteCloudinaryAsset(url) {
     const parsed = parseCloudinaryAsset(url);
-    if (!parsed) return; // no url, or not a recognisable Cloudinary url — nothing to clean up
+    if (!parsed) return;
     try {
       await cloudinary.uploader.destroy(parsed.publicId, { resource_type: parsed.resourceType });
     } catch (err) {
-      console.error("[deleteCloudinaryAsset] failed to destroy asset:", parsed, err);
-      // Best-effort only — an orphaned Cloudinary asset is better than
-      // blocking the delete/replace request that's already committed in the DB.
+      // Best-effort only: an orphaned Cloudinary asset is better than
+      // blocking a request that is already committed in the DB.
+      console.error("[deleteCloudinaryAsset] failed to destroy asset:", parsed, err.message);
     }
   }
 
-  // Same fractional-position helper as routes/projects.js — see that file
-  // for the full explanation. Duplicated here rather than shared so this
-  // route file stays fully self-contained.
+  // Turns "" or whitespace-only strings into null, trims everything else.
+  // Used for every link field so a cleared input is stored as NULL.
+  function cleanUrl(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    return trimmed === "" ? null : trimmed;
+  }
+
   async function computePosition(client, { table, scopeColumn, scopeValue, insertBeforeId }) {
     const hasScope = Boolean(scopeColumn);
 
@@ -88,15 +90,12 @@ module.exports = function experienceRoutes(pool, cloudinary) {
     const prevParams = hasScope ? [scopeValue, targetPos] : [targetPos];
     const { rows: prevRows } = await client.query(prevSql, prevParams);
 
-    if (prevRows.length === 0) {
-      return targetPos - 1;
-    }
+    if (prevRows.length === 0) return targetPos - 1;
     return (Number(prevRows[0].position) + targetPos) / 2;
   }
+
   // Computes a human-readable duration ("1 yr 3 mos", "6 mos") from
-  // start_date/end_date. Runs server-side whenever either date changes, so
-  // duration is never manually typed and can't drift out of sync with the
-  // actual dates.
+  // start_date/end_date. Runs server-side whenever either date changes.
   function calculateDuration(startDate, endDate) {
     if (!startDate) return "";
     const start = new Date(startDate);
@@ -122,12 +121,13 @@ module.exports = function experienceRoutes(pool, cloudinary) {
       experiences: experiences.filter((e) => e.category_id === cat.id),
     }));
   }
-  
+
   const EXPERIENCE_RETURNING = `
     id, category_id, company_name AS "companyName", role,
     image_url AS image, description,
     start_date AS "startDate", end_date AS "endDate", duration,
-    tech_stack AS "techStack", certificate_url AS "certificateUrl"
+    tech_stack AS "techStack", certificate_url AS "certificateUrl",
+    video_url AS "videoUrl", document_url AS "documentUrl"
   `;
 
   /* =================== READ =================== */
@@ -199,18 +199,13 @@ module.exports = function experienceRoutes(pool, cloudinary) {
   });
 
   router.delete("/experience-categories/:id", async (req, res) => {
-    // NOTE: assumes experiences.category_id has ON DELETE CASCADE — same
-    // assumption the original route made by not deleting child experience
-    // rows itself. If that's not the case in your schema, deleting a
-    // category that still has experiences in it will fail with a FK
-    // violation before it ever gets here.
+    // Assumes experiences.category_id has ON DELETE CASCADE.
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
 
-      // Grab every experience's image URL in this category BEFORE the
-      // cascade wipes those rows out, so we know what to clean up on
-      // Cloudinary afterwards.
+      // Grab every experience's image URL BEFORE the cascade removes the
+      // rows, so we know what to clean up on Cloudinary afterwards.
       const { rows: experienceRows } = await client.query(
         `SELECT image_url FROM experiences WHERE category_id = $1;`,
         [req.params.id]
@@ -228,7 +223,6 @@ module.exports = function experienceRoutes(pool, cloudinary) {
 
       await client.query("COMMIT");
 
-      // Best-effort Cloudinary cleanup, only after the DB change is safely committed.
       for (const { image_url } of experienceRows) {
         await deleteCloudinaryAsset(image_url);
       }
@@ -245,11 +239,9 @@ module.exports = function experienceRoutes(pool, cloudinary) {
 
   /* =================== EXPERIENCES =================== */
 
-  // Create an experience entry. body:
-  //   { categoryId, companyName, role, description?, duration?, techStack?,
-  //     certificateUrl?, imageUrl?, insertBeforeId? }
-  // imageUrl (optional) is a Cloudinary URL already obtained elsewhere; you
-  // can also create first and attach an image after via the /image route.
+  // ---- ADD (first time): stores videoUrl + documentUrl ----
+  // body: { categoryId, companyName, role, description?, startDate?, endDate?,
+  //         techStack?, certificateUrl?, videoUrl?, documentUrl?, imageUrl?, insertBeforeId? }
   router.post("/experiences", async (req, res) => {
     const {
       categoryId,
@@ -260,6 +252,8 @@ module.exports = function experienceRoutes(pool, cloudinary) {
       endDate = null,
       techStack = [],
       certificateUrl = null,
+      videoUrl = null,
+      documentUrl = null,
       imageUrl = null,
       insertBeforeId = null,
     } = req.body;
@@ -281,27 +275,45 @@ module.exports = function experienceRoutes(pool, cloudinary) {
       });
       const { rows } = await client.query(
         `INSERT INTO experiences
-           (category_id, company_name, role, description, start_date, end_date, duration, tech_stack, certificate_url, image_url, position)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           (category_id, company_name, role, description, start_date, end_date, duration,
+            tech_stack, certificate_url, video_url, document_url, image_url, position)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING ${EXPERIENCE_RETURNING};`,
-        [categoryId, companyName.trim(), role.trim(), description, startDate, endDate, duration, techStack, certificateUrl, imageUrl, position]
+        [
+          categoryId,
+          companyName.trim(),
+          role.trim(),
+          description,
+          startDate,
+          endDate,
+          duration,
+          techStack,
+          cleanUrl(certificateUrl),
+          cleanUrl(videoUrl),
+          cleanUrl(documentUrl),
+          imageUrl,
+          position,
+        ]
       );
       await client.query("COMMIT");
       res.status(201).json(rows[0]);
     } catch (err) {
       await client.query("ROLLBACK");
-      console.error("[POST /experiences] ERROR:", err);
-      res.status(err.status || 500).json({ error: err.message || "Failed to create experience" });
+      console.error("[POST /experiences] ERROR:", err.message, err.code, err.detail);
+      res.status(err.status || 500).json({
+        error: err.message || "Failed to create experience",
+        code: err.code,
+        detail: err.detail,
+      });
     } finally {
       client.release();
     }
   });
-  // Partial update. body: any subset of
-  //   { companyName, role, description, duration, techStack, certificateUrl }
-  // Image is intentionally NOT editable here — use POST /experiences/:id/image.
-  // duration is no longer a directly-editable field. startDate/endDate are
-  // the source of truth — changing either recomputes duration here. If only
-  // one date is sent, the other is read from the existing row first.
+
+  // ---- EDIT: only the fields present in the request body are updated ----
+  // duration is not directly editable: startDate/endDate are the source of
+  // truth, and changing either recomputes duration here. If only one date is
+  // sent, the other is read from the existing row first.
   const PATCHABLE_FIELDS = {
     companyName: "company_name",
     role: "role",
@@ -310,12 +322,20 @@ module.exports = function experienceRoutes(pool, cloudinary) {
     endDate: "end_date",
     techStack: "tech_stack",
     certificateUrl: "certificate_url",
+    videoUrl: "video_url",
+    documentUrl: "document_url",
   };
+
+  const URL_FIELDS = ["certificateUrl", "videoUrl", "documentUrl"];
 
   router.patch("/experiences/:id", async (req, res) => {
     const updates = Object.keys(req.body).filter((key) => key in PATCHABLE_FIELDS);
     if (updates.length === 0) {
-      return res.status(400).json({ error: "No valid fields to update" });
+      return res.status(400).json({
+        error: "No valid fields to update",
+        received: Object.keys(req.body),
+        allowed: Object.keys(PATCHABLE_FIELDS),
+      });
     }
 
     const client = await pool.connect();
@@ -337,8 +357,12 @@ module.exports = function experienceRoutes(pool, cloudinary) {
         finalUpdates = [...new Set([...updates, "duration"])];
       }
 
-      const setClauses = finalUpdates.map((key, i) => `${key === "duration" ? "duration" : PATCHABLE_FIELDS[key]} = $${i + 1}`);
-      const values = finalUpdates.map((key) => body[key]);
+      const setClauses = finalUpdates.map(
+        (key, i) => `${key === "duration" ? "duration" : PATCHABLE_FIELDS[key]} = $${i + 1}`
+      );
+      const values = finalUpdates.map((key) =>
+        URL_FIELDS.includes(key) ? cleanUrl(body[key]) : body[key]
+      );
       values.push(req.params.id);
 
       const { rows } = await client.query(
@@ -349,8 +373,8 @@ module.exports = function experienceRoutes(pool, cloudinary) {
       if (rows.length === 0) return res.status(404).json({ error: "Experience not found" });
       res.json(rows[0]);
     } catch (err) {
-      console.error("[PATCH /experiences/:id] ERROR:", err);
-      res.status(500).json({ error: "Failed to update experience" });
+      console.error("[PATCH /experiences/:id] ERROR:", err.message, err.code, err.detail);
+      res.status(500).json({ error: "Failed to update experience", detail: err.message });
     } finally {
       client.release();
     }
@@ -358,15 +382,12 @@ module.exports = function experienceRoutes(pool, cloudinary) {
 
   router.delete("/experiences/:id", async (req, res) => {
     try {
-      // RETURNING image_url so we know what to clean up on Cloudinary
-      // without a separate SELECT round-trip.
       const { rows } = await pool.query(
         `DELETE FROM experiences WHERE id = $1 RETURNING image_url;`,
         [req.params.id]
       );
       if (rows.length === 0) return res.status(404).json({ error: "Experience not found" });
 
-      // Best-effort — the experience row is already gone either way.
       await deleteCloudinaryAsset(rows[0].image_url);
 
       res.json({ ok: true });
@@ -386,8 +407,6 @@ module.exports = function experienceRoutes(pool, cloudinary) {
     }
 
     try {
-      // Look up what's currently attached BEFORE we upload the replacement,
-      // so we know what to delete from Cloudinary once the new one is safely saved.
       const { rows: existingRows } = await pool.query(
         `SELECT image_url FROM experiences WHERE id = $1;`,
         [req.params.id]
@@ -409,9 +428,7 @@ module.exports = function experienceRoutes(pool, cloudinary) {
       );
       if (rows.length === 0) return res.status(404).json({ error: "Experience not found" });
 
-      // Only now — new asset is uploaded AND saved to the DB — remove the
-      // old one. If this were reversed and the upload/DB step failed, we'd
-      // have deleted the working asset for nothing.
+      // Remove the old asset only after the new one is uploaded AND saved.
       if (oldUrl && oldUrl !== uploadResult.secure_url) {
         await deleteCloudinaryAsset(oldUrl);
       }

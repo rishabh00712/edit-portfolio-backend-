@@ -1,6 +1,8 @@
-// routes/projects.js — DEBUG VERSION
-// Every step logs to the terminal so we can see exactly where it breaks.
-// Once it's working, we can strip these back out.
+// routes/projects.js
+// Supports videoUrl and documentUrl on BOTH:
+//   - POST  /projects       (first-time add)
+//   - PATCH /projects/:id   (edit later)
+// Errors are logged to the server console so failures show up in Render logs.
 
 const express = require("express");
 const multer = require("multer");
@@ -14,12 +16,7 @@ module.exports = function projectRoutes(pool, cloudinary) {
   });
 
   // ---- Cloudinary cleanup helpers ----
-  // secure_urls look like:
-  //   https://res.cloudinary.com/<cloud>/image/upload/v169.../portfolio/projects/abc123.jpg
-  //   https://res.cloudinary.com/<cloud>/video/upload/v169.../portfolio/projects/abc123.mp4
-  // resource_type (image/video) and public_id are both embedded in the path,
-  // so we don't need a separate DB column to know what to destroy.
-   function parseCloudinaryAsset(url) {
+  function parseCloudinaryAsset(url) {
     if (!url) return null;
     const match = url.match(/\/image\/upload\/(?:v\d+\/)?([^.]+)\.[a-zA-Z0-9]+(?:\?.*)?$/);
     if (!match) return null;
@@ -28,19 +25,26 @@ module.exports = function projectRoutes(pool, cloudinary) {
 
   async function deleteCloudinaryAsset(url) {
     const parsed = parseCloudinaryAsset(url);
-    if (!parsed) return; // no url, or not a recognisable Cloudinary url — nothing to clean up
+    if (!parsed) return;
     try {
       await cloudinary.uploader.destroy(parsed.publicId, { resource_type: parsed.resourceType });
-      // console.log("[deleteCloudinaryAsset] destroyed:", parsed);
     } catch (err) {
-      // console.error("[deleteCloudinaryAsset] failed to destroy asset:", parsed, err);
-      // Best-effort only — an orphaned Cloudinary asset is better than
-      // blocking the delete/replace request that's already committed in the DB.
+      // Best-effort only: an orphaned Cloudinary asset is better than
+      // blocking a request that is already committed in the DB.
+      console.error("[deleteCloudinaryAsset] failed:", parsed, err.message);
     }
   }
 
+  // Turns "" or whitespace-only strings into null, trims everything else.
+  // Used for every link field so a cleared input is stored as NULL.
+  function cleanUrl(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    return trimmed === "" ? null : trimmed;
+  }
+
   async function computePosition(client, { table, scopeColumn, scopeValue, insertBeforeId }) {
-    // console.log("[computePosition] called with:", { table, scopeColumn, scopeValue, insertBeforeId });
     const hasScope = Boolean(scopeColumn);
 
     if (insertBeforeId === null || insertBeforeId === undefined) {
@@ -48,9 +52,7 @@ module.exports = function projectRoutes(pool, cloudinary) {
         ? `SELECT COALESCE(MAX(position), 0) + 1 AS pos FROM ${table} WHERE ${scopeColumn} = $1;`
         : `SELECT COALESCE(MAX(position), 0) + 1 AS pos FROM ${table};`;
       const params = hasScope ? [scopeValue] : [];
-      // console.log("[computePosition] append-at-end SQL:", sql, params);
       const { rows } = await client.query(sql, params);
-      // console.log("[computePosition] append-at-end result:", rows);
       return Number(rows[0].pos);
     }
 
@@ -58,14 +60,11 @@ module.exports = function projectRoutes(pool, cloudinary) {
       ? `SELECT position FROM ${table} WHERE ${scopeColumn} = $1 AND id = $2;`
       : `SELECT position FROM ${table} WHERE id = $1;`;
     const targetParams = hasScope ? [scopeValue, insertBeforeId] : [insertBeforeId];
-    // console.log("[computePosition] target SQL:", targetSql, targetParams);
     const { rows: targetRows } = await client.query(targetSql, targetParams);
-    // console.log("[computePosition] target result:", targetRows);
 
     if (targetRows.length === 0) {
       const err = new Error("insertBeforeId does not exist in this scope");
       err.status = 400;
-      // console.log("[computePosition] ERROR: insertBeforeId not found");
       throw err;
     }
     const targetPos = Number(targetRows[0].position);
@@ -74,17 +73,10 @@ module.exports = function projectRoutes(pool, cloudinary) {
       ? `SELECT position FROM ${table} WHERE ${scopeColumn} = $1 AND position < $2 ORDER BY position DESC LIMIT 1;`
       : `SELECT position FROM ${table} WHERE position < $1 ORDER BY position DESC LIMIT 1;`;
     const prevParams = hasScope ? [scopeValue, targetPos] : [targetPos];
-    // console.log("[computePosition] prev SQL:", prevSql, prevParams);
     const { rows: prevRows } = await client.query(prevSql, prevParams);
-    // console.log("[computePosition] prev result:", prevRows);
 
-    if (prevRows.length === 0) {
-      // console.log("[computePosition] target was first, new position =", targetPos - 1);
-      return targetPos - 1;
-    }
-    const finalPos = (Number(prevRows[0].position) + targetPos) / 2;
-    // console.log("[computePosition] midpoint position =", finalPos);
-    return finalPos;
+    if (prevRows.length === 0) return targetPos - 1;
+    return (Number(prevRows[0].position) + targetPos) / 2;
   }
 
   function groupByCategory(categories, projects) {
@@ -99,26 +91,24 @@ module.exports = function projectRoutes(pool, cloudinary) {
     id, category_id, name, image_url AS image,
     short_description AS "shortDescription", description,
     tech_stack AS "techStack", why,
-    live_url AS "liveUrl", github_url AS "githubUrl"
+    live_url AS "liveUrl", github_url AS "githubUrl",
+    video_url AS "videoUrl", document_url AS "documentUrl"
   `;
 
   /* =================== READ =================== */
 
   router.get("/projects", async (req, res) => {
-    // console.log("[GET /projects] request received");
     try {
       const categoriesResult = await pool.query(
         `SELECT id, label FROM project_categories ORDER BY position ASC;`
       );
-      // console.log("[GET /projects] categories:", categoriesResult.rows);
       const projectsResult = await pool.query(
         `SELECT ${PROJECT_RETURNING} FROM projects ORDER BY position ASC;`
       );
-      // console.log("[GET /projects] projects count:", projectsResult.rows.length);
       const categories = groupByCategory(categoriesResult.rows, projectsResult.rows);
       res.json({ categories });
     } catch (err) {
-      // console.error("[GET /projects] ERROR:", err);
+      console.error("[GET /projects] ERROR:", err.message, err.code);
       res.status(500).json({ error: "Failed to fetch projects" });
     }
   });
@@ -126,48 +116,33 @@ module.exports = function projectRoutes(pool, cloudinary) {
   /* =================== CATEGORIES =================== */
 
   router.post("/project-categories", async (req, res) => {
-    // console.log("[POST /project-categories] body received:", req.body);
     const { label, insertBeforeId = null } = req.body;
 
     if (!label || !label.trim()) {
-      // console.log("[POST /project-categories] REJECTED: no label");
       return res.status(400).json({ error: "label is required" });
     }
 
-    // console.log("[POST /project-categories] connecting to pool...");
     const client = await pool.connect();
-    // console.log("[POST /project-categories] connected");
-
     try {
-      // console.log("[POST /project-categories] BEGIN transaction");
       await client.query("BEGIN");
 
-      // console.log("[POST /project-categories] computing position...");
       const position = await computePosition(client, {
         table: "project_categories",
         scopeColumn: null,
         scopeValue: null,
         insertBeforeId,
       });
-      // console.log("[POST /project-categories] position computed:", position);
 
-      const insertSql = `INSERT INTO project_categories (label, position) VALUES ($1, $2) RETURNING id, label;`;
-      // console.log("[POST /project-categories] running insert:", insertSql, [label.trim(), position]);
-      const { rows } = await client.query(insertSql, [label.trim(), position]);
-      // console.log("[POST /project-categories] insert result:", rows);
+      const { rows } = await client.query(
+        `INSERT INTO project_categories (label, position) VALUES ($1, $2) RETURNING id, label;`,
+        [label.trim(), position]
+      );
 
       await client.query("COMMIT");
-      // console.log("[POST /project-categories] COMMIT successful");
-
       res.status(201).json({ ...rows[0], projects: [] });
     } catch (err) {
       await client.query("ROLLBACK");
-      // console.error("[POST /project-categories] ERROR — full details below:");
-      // console.error("  message:", err.message);
-      // console.error("  code:", err.code);       // Postgres error code, e.g. 23505 = unique violation
-      // console.error("  detail:", err.detail);   // Postgres's human-readable detail line
-      // console.error("  constraint:", err.constraint);
-      // console.error("  stack:", err.stack);
+      console.error("[POST /project-categories] ERROR:", err.message, err.code, err.detail);
       res.status(err.status || 500).json({
         error: err.message || "Failed to create category",
         code: err.code,
@@ -175,7 +150,6 @@ module.exports = function projectRoutes(pool, cloudinary) {
       });
     } finally {
       client.release();
-      // console.log("[POST /project-categories] client released");
     }
   });
 
@@ -192,29 +166,23 @@ module.exports = function projectRoutes(pool, cloudinary) {
       if (rows.length === 0) return res.status(404).json({ error: "Category not found" });
       res.json(rows[0]);
     } catch (err) {
-      // console.error(err);
+      console.error("[PATCH /project-categories/:id] ERROR:", err.message, err.code);
       res.status(500).json({ error: "Failed to update category" });
     }
   });
 
   router.delete("/project-categories/:id", async (req, res) => {
-    // NOTE: assumes projects.category_id has ON DELETE CASCADE — the
-    // original route relied on the same assumption by not deleting child
-    // project rows itself. If that's not the case in your schema, deleting
-    // a category with projects still in it will fail with a FK violation
-    // before it ever gets here.
+    // Assumes projects.category_id has ON DELETE CASCADE.
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
 
-      // Grab every project's image/video URL in this category BEFORE the
-      // cascade wipes those rows out, so we know what to clean up on
-      // Cloudinary afterwards.
+      // Grab every project's image URL BEFORE the cascade removes the rows,
+      // so we know what to clean up on Cloudinary afterwards.
       const { rows: projectRows } = await client.query(
         `SELECT image_url FROM projects WHERE category_id = $1;`,
         [req.params.id]
       );
-      // console.log("[DELETE /project-categories/:id] assets to clean up:", projectRows);
 
       const { rowCount } = await client.query(
         `DELETE FROM project_categories WHERE id = $1;`,
@@ -228,7 +196,6 @@ module.exports = function projectRoutes(pool, cloudinary) {
 
       await client.query("COMMIT");
 
-      // Best-effort Cloudinary cleanup, only after the DB change is safely committed.
       for (const { image_url } of projectRows) {
         await deleteCloudinaryAsset(image_url);
       }
@@ -236,7 +203,7 @@ module.exports = function projectRoutes(pool, cloudinary) {
       res.json({ ok: true });
     } catch (err) {
       await client.query("ROLLBACK");
-      // console.error(err);
+      console.error("[DELETE /project-categories/:id] ERROR:", err.message, err.code);
       res.status(500).json({ error: "Failed to delete category" });
     } finally {
       client.release();
@@ -245,8 +212,8 @@ module.exports = function projectRoutes(pool, cloudinary) {
 
   /* =================== PROJECTS =================== */
 
+  // ---- ADD (first time): stores videoUrl + documentUrl ----
   router.post("/projects", async (req, res) => {
-    // console.log("[POST /projects] body received:", req.body);
     const {
       categoryId,
       name,
@@ -256,45 +223,54 @@ module.exports = function projectRoutes(pool, cloudinary) {
       why = "",
       liveUrl = null,
       githubUrl = null,
+      videoUrl = null,
+      documentUrl = null,
       imageUrl = null,
       insertBeforeId = null,
     } = req.body;
 
     if (!categoryId || !name || !name.trim()) {
-      // console.log("[POST /projects] REJECTED: missing categoryId or name");
       return res.status(400).json({ error: "categoryId and name are required" });
     }
 
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+
       const position = await computePosition(client, {
         table: "projects",
         scopeColumn: "category_id",
         scopeValue: categoryId,
         insertBeforeId,
       });
-      // console.log("[POST /projects] position computed:", position);
 
       const { rows } = await client.query(
         `INSERT INTO projects
-           (category_id, name, short_description, description, tech_stack, why, live_url, github_url, image_url, position)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           (category_id, name, short_description, description, tech_stack, why,
+            live_url, github_url, video_url, document_url, image_url, position)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING ${PROJECT_RETURNING};`,
-        [categoryId, name.trim(), shortDescription, description, techStack, why, liveUrl, githubUrl, imageUrl, position]
+        [
+          categoryId,
+          name.trim(),
+          shortDescription,
+          description,
+          techStack,
+          why,
+          cleanUrl(liveUrl),
+          cleanUrl(githubUrl),
+          cleanUrl(videoUrl),
+          cleanUrl(documentUrl),
+          imageUrl,
+          position,
+        ]
       );
-      // console.log("[POST /projects] insert result:", rows);
 
       await client.query("COMMIT");
       res.status(201).json(rows[0]);
     } catch (err) {
       await client.query("ROLLBACK");
-      // console.error("[POST /projects] ERROR — full details below:");
-      // console.error("  message:", err.message);
-      // console.error("  code:", err.code);
-      // console.error("  detail:", err.detail);
-      // console.error("  constraint:", err.constraint);
-      // console.error("  stack:", err.stack);
+      console.error("[POST /projects] ERROR:", err.message, err.code, err.detail);
       res.status(err.status || 500).json({
         error: err.message || "Failed to create project",
         code: err.code,
@@ -305,6 +281,7 @@ module.exports = function projectRoutes(pool, cloudinary) {
     }
   });
 
+  // ---- EDIT: only the fields present in the request body are updated ----
   const PATCHABLE_FIELDS = {
     name: "name",
     shortDescription: "short_description",
@@ -313,16 +290,26 @@ module.exports = function projectRoutes(pool, cloudinary) {
     why: "why",
     liveUrl: "live_url",
     githubUrl: "github_url",
+    videoUrl: "video_url",
+    documentUrl: "document_url",
   };
+
+  const URL_FIELDS = ["liveUrl", "githubUrl", "videoUrl", "documentUrl"];
 
   router.patch("/projects/:id", async (req, res) => {
     const updates = Object.keys(req.body).filter((key) => key in PATCHABLE_FIELDS);
     if (updates.length === 0) {
-      return res.status(400).json({ error: "No valid fields to update" });
+      return res.status(400).json({
+        error: "No valid fields to update",
+        received: Object.keys(req.body),
+        allowed: Object.keys(PATCHABLE_FIELDS),
+      });
     }
 
     const setClauses = updates.map((key, i) => `${PATCHABLE_FIELDS[key]} = $${i + 1}`);
-    const values = updates.map((key) => req.body[key]);
+    const values = updates.map((key) =>
+      URL_FIELDS.includes(key) ? cleanUrl(req.body[key]) : req.body[key]
+    );
     values.push(req.params.id);
 
     try {
@@ -334,45 +321,39 @@ module.exports = function projectRoutes(pool, cloudinary) {
       if (rows.length === 0) return res.status(404).json({ error: "Project not found" });
       res.json(rows[0]);
     } catch (err) {
-      // console.error(err);
-      res.status(500).json({ error: "Failed to update project" });
+      console.error("[PATCH /projects/:id] ERROR:", err.message, err.code, err.detail);
+      res.status(500).json({ error: "Failed to update project", detail: err.message });
     }
   });
 
   router.delete("/projects/:id", async (req, res) => {
     try {
-      // RETURNING image_url so we know what to clean up on Cloudinary
-      // without a separate SELECT round-trip.
       const { rows } = await pool.query(
         `DELETE FROM projects WHERE id = $1 RETURNING image_url;`,
         [req.params.id]
       );
       if (rows.length === 0) return res.status(404).json({ error: "Project not found" });
 
-      // Best-effort — the project row is already gone either way.
       await deleteCloudinaryAsset(rows[0].image_url);
 
       res.json({ ok: true });
     } catch (err) {
-      // console.error(err);
+      console.error("[DELETE /projects/:id] ERROR:", err.message, err.code);
       res.status(500).json({ error: "Failed to delete project" });
     }
   });
 
-  // Accepts images AND videos now (Cloudinary free-plan friendly — see the
-  // multer limit above). resource_type: "auto" lets Cloudinary sort out
-  // which one it is; we don't need to know ahead of time.
+  // Image upload (Cloudinary). Video and document are plain external links,
+  // so they don't need any upload or cleanup.
   router.post("/projects/:id/image", upload.single("image"), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded (field name must be 'image')" });
     }
-       if (!req.file.mimetype.startsWith("image/")) {
+    if (!req.file.mimetype.startsWith("image/")) {
       return res.status(400).json({ error: "Uploaded file must be an image" });
     }
 
     try {
-      // Look up what's currently attached BEFORE we upload the replacement,
-      // so we know what to delete from Cloudinary once the new one is safely saved.
       const { rows: existingRows } = await pool.query(
         `SELECT image_url FROM projects WHERE id = $1;`,
         [req.params.id]
@@ -383,7 +364,7 @@ module.exports = function projectRoutes(pool, cloudinary) {
       const oldUrl = existingRows[0].image_url;
 
       const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
-            const uploadResult = await cloudinary.uploader.upload(dataUri, {
+      const uploadResult = await cloudinary.uploader.upload(dataUri, {
         folder: "portfolio/projects",
         resource_type: "image",
       });
@@ -394,16 +375,14 @@ module.exports = function projectRoutes(pool, cloudinary) {
       );
       if (rows.length === 0) return res.status(404).json({ error: "Project not found" });
 
-      // Only now — new asset is uploaded AND saved to the DB — remove the
-      // old one. If this were reversed and the upload/DB step failed, we'd
-      // have deleted the working asset for nothing.
+      // Remove the old asset only after the new one is uploaded AND saved.
       if (oldUrl && oldUrl !== uploadResult.secure_url) {
         await deleteCloudinaryAsset(oldUrl);
       }
 
       res.json(rows[0]);
     } catch (err) {
-      // console.error(err);
+      console.error("[POST /projects/:id/image] ERROR:", err.message);
       res.status(500).json({ error: "Failed to upload image" });
     }
   });
