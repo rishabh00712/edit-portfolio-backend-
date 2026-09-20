@@ -213,6 +213,8 @@ async function endSession(req, res) {
   res.clearCookie(COOKIE_NAME, cookieOptions());
 }
 
+
+
 // Brevo transactional email (Node 18+ has global fetch).
 // Only MY_OWN_API_KEY is required in .env. The "from" address defaults to
 // OWNER_EMAIL, which must be a sender/email you have verified in Brevo.
